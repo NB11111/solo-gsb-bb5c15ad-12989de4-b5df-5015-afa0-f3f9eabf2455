@@ -54,6 +54,10 @@ class CorrectionIn(BaseModel):
     reading: float = Field(description="待校正的原始读数")
 
 
+class ObservationReviseIn(ObservationIn):
+    revision: int = Field(ge=1, description="客户端持有的当前版本号；与服务端不一致时拒绝修订（409）")
+
+
 # ---------- 响应 ----------
 
 class ReadingOut(BaseModel):
@@ -63,6 +67,7 @@ class ReadingOut(BaseModel):
 
 class ObservationOut(BaseModel):
     id: int
+    revision: int
     timestamp: float
     timestamp_iso: str
     reference: float
@@ -71,6 +76,18 @@ class ObservationOut(BaseModel):
     bias: float
     readings: list[ReadingOut]
     outliers: list[float]
+
+
+class RevisionOut(BaseModel):
+    revision: int = Field(description="该快照对应的版本（修订前版本）")
+    changed_at: float
+    changed_at_iso: str
+    old_timestamp: float
+    old_timestamp_iso: str
+    old_reference: float
+    old_tolerance: float
+    old_bias: float
+    old_readings: list[float] = Field(description="修订前原始读数（保持提交顺序）")
 
 
 class IntervalOut(BaseModel):

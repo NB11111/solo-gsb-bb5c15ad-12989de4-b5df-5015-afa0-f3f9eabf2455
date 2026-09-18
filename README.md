@@ -20,8 +20,9 @@ SQLite 数据落在命名卷 `calibration-data`（容器内 `/data/calibration.d
 2. **异常判定**：读数偏离该组**中位数**超过 `tolerance` 即标记为异常（原始读数仍完整保留）。
 3. **校准偏差**：`bias = reference − 有效读数（剔除异常后）的中位数`。
 4. **漂移补偿**：在相邻观测时点间对 `bias` 做**线性插值**，`校正读数 = 原始读数 + 插值偏差`。
-5. **区间重算**：新增观测只重算与其相邻的区间（旧区间被新时点拆分），历史区间与原始数据不变。
+5. **区间重算**：新增/修订观测只重算受影响的相邻区间（原位置缺口重新接通、新位置区间被时点拆分），其余历史区间与原始数据不变。
 6. **覆盖范围**：查询时点超出 `[最早观测, 最晚观测]` 时拒绝（HTTP 400）；恰落在观测点上时直接使用该点偏差。
+7. **修订与版本**：观测带单调递增的 `revision`（新建为 1）。`PUT` 修订须携带当前 `revision`，版本过期或目标时点已被占用均返回 409；成功后观测 ID 不变、版本 +1，并保存一份修订前快照（旧输入与旧偏差），可通过修订历史接口按版本倒序查询。
 
 ## API 一览
 
@@ -29,6 +30,8 @@ SQLite 数据落在命名卷 `calibration-data`（容器内 `/data/calibration.d
 | --- | --- | --- |
 | POST | `/observations` | 登记校准观测，返回偏差与异常明细（201） |
 | GET | `/observations` | 列出全部观测（含原始读数与异常标记） |
+| PUT | `/observations/{id}` | 修订观测（乐观锁版本校验，409 冲突；ID 不变，版本 +1） |
+| GET | `/observations/{id}/revisions` | 按版本倒序列出修订前快照（旧输入与旧偏差） |
 | GET | `/intervals` | 列出当前插值区间 |
 | POST | `/corrections` | 对指定时点的读数做漂移补偿 |
 | GET | `/health` | 健康检查 |
@@ -48,7 +51,7 @@ curl -X POST http://localhost:8000/observations \
 
 ```json
 {
-  "id": 1, "timestamp": 1789718400.0, "timestamp_iso": "2026-09-18T08:00:00+00:00",
+  "id": 1, "revision": 1, "timestamp": 1789718400.0, "timestamp_iso": "2026-09-18T08:00:00+00:00",
   "reference": 100.0, "tolerance": 0.5, "group_median": 99.1, "bias": 1.0,
   "readings": [
     {"value": 99.0, "is_outlier": false}, {"value": 99.2, "is_outlier": false},
@@ -57,6 +60,60 @@ curl -X POST http://localhost:8000/observations \
   "outliers": [150.0]
 }
 ```
+
+### 修订观测
+
+修订请求体与登记一致（`reference`、`tolerance`、`readings`、`timestamp`），额外携带客户端持有的当前 `revision`。服务在单个事务内重新判定异常、重算偏差，并重建**原位置与新位置**受影响的相邻插值区间；观测 ID 保持不变。版本不匹配（已被他人修订）或目标时间戳已被其它观测占用时返回 409，数据不变。
+
+```bash
+curl -X PUT http://localhost:8000/observations/1 \
+  -H 'Content-Type: application/json' \
+  -d '{"timestamp": "2026-09-18T08:00:00Z", "reference": 100.0,
+       "tolerance": 0.5, "readings": [99.1, 99.0, 99.2], "revision": 1}'
+```
+
+响应与登记观测相同，`revision` 推进为 `2`：
+
+```json
+{
+  "id": 1, "revision": 2, "timestamp": 1789718400.0,
+  "timestamp_iso": "2026-09-18T08:00:00+00:00",
+  "reference": 100.0, "tolerance": 0.5, "group_median": 99.1, "bias": 0.9,
+  "readings": [
+    {"value": 99.1, "is_outlier": false}, {"value": 99.0, "is_outlier": false},
+    {"value": 99.2, "is_outlier": false}
+  ],
+  "outliers": []
+}
+```
+
+版本冲突（或时间戳冲突）响应：
+
+```json
+{"detail": "observation 1 is at revision 2, not 1; fetch the latest observation and retry"}
+```
+
+### 查询修订历史
+
+每次成功修订都会先保存一份修订前快照。按版本倒序返回变更时间、旧输入（旧时点、旧参考值、旧容差、旧读数）与旧偏差：
+
+```bash
+curl http://localhost:8000/observations/1/revisions
+```
+
+```json
+[
+  {
+    "revision": 1,
+    "changed_at": 1789720200.0, "changed_at_iso": "2026-09-18T08:30:00+00:00",
+    "old_timestamp": 1789718400.0, "old_timestamp_iso": "2026-09-18T08:00:00+00:00",
+    "old_reference": 100.0, "old_tolerance": 0.5, "old_bias": 1.0,
+    "old_readings": [99.0, 99.2, 98.8, 150.0]
+  }
+]
+```
+
+从未修订过的观测返回空数组 `[]`；观测 ID 不存在时两个接口均返回 404。
 
 ### 漂移补偿
 
@@ -89,7 +146,8 @@ curl -X POST http://localhost:8000/corrections \
 | 状态码 | 场景 |
 | --- | --- |
 | 400 | 查询时点超出校准覆盖范围（响应含可用区间） |
-| 409 | 同一时点重复登记观测 |
+| 404 | 修订/查询修订历史时观测 ID 不存在 |
+| 409 | 同一时点重复登记观测；修订时版本过期或目标时点已被占用 |
 | 422 | 读数不足 3 次、全部读数被判异常、参数非法 |
 
 ## 本地开发
