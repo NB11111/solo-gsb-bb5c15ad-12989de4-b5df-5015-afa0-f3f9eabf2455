@@ -8,8 +8,21 @@ from fastapi import FastAPI, HTTPException
 from . import service
 from .calibration import CalibrationError
 from .db import init_db
-from .models import CorrectionIn, CorrectionOut, IntervalOut, ObservationIn, ObservationOut
-from .service import DuplicateTimestampError, OutOfCoverageError
+from .models import (
+    CorrectionIn,
+    CorrectionOut,
+    IntervalOut,
+    ObservationIn,
+    ObservationOut,
+    ObservationUpdate,
+    RevisionOut,
+)
+from .service import (
+    DuplicateTimestampError,
+    ObservationNotFoundError,
+    OutOfCoverageError,
+    RevisionConflictError,
+)
 
 
 @asynccontextmanager
@@ -54,6 +67,35 @@ def post_observation(payload: ObservationIn) -> dict:
 def get_observations() -> list[dict]:
     """按时点列出全部观测（含原始读数与异常标记）。"""
     return service.list_observations()
+
+
+@app.put("/observations/{obs_id}", response_model=ObservationOut)
+def put_observation(obs_id: int, payload: ObservationUpdate) -> dict:
+    """修订既有观测：携带当前 revision；版本或目标时点冲突返回 409，ID 不存在返回 404。"""
+    try:
+        return service.revise_observation(
+            obs_id=obs_id,
+            reference=payload.reference,
+            tolerance=payload.tolerance,
+            readings=payload.readings,
+            ts=payload.timestamp,
+            expected_revision=payload.revision,
+        )
+    except ObservationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except RevisionConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except CalibrationError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+@app.get("/observations/{obs_id}/revisions", response_model=list[RevisionOut])
+def get_observation_revisions(obs_id: int) -> list[dict]:
+    """按版本倒序返回修订记录（变更时间、旧输入、旧偏差）。"""
+    try:
+        return service.list_revisions(obs_id)
+    except ObservationNotFoundError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 @app.get("/intervals", response_model=list[IntervalOut])

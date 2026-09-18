@@ -49,6 +49,16 @@ class ObservationIn(BaseModel):
     )
 
 
+class ObservationUpdate(BaseModel):
+    """修订观测的请求：字段沿用登记接口，并携带客户端持有的当前 revision。"""
+
+    reference: float = Field(description="参考值（真值）")
+    tolerance: float = Field(ge=0, description="容差：读数偏离组中位数超过该值即判为异常")
+    readings: list[float] = Field(min_length=3, description="同一时点的读数，至少 3 次")
+    timestamp: Timestamp = Field(description="目标观测时点：Unix 秒或 ISO 8601，可改到新时点")
+    revision: int = Field(ge=1, description="客户端持有的当前版本号；过期则冲突 409")
+
+
 class CorrectionIn(BaseModel):
     timestamp: Timestamp = Field(description="待校正读数的时点：Unix 秒或 ISO 8601")
     reading: float = Field(description="待校正的原始读数")
@@ -69,8 +79,24 @@ class ObservationOut(BaseModel):
     tolerance: float
     group_median: float
     bias: float
+    revision: int = Field(description="当前版本号，首次登记为 1，每次成功修订 +1")
     readings: list[ReadingOut]
     outliers: list[float]
+
+
+class RevisionOut(BaseModel):
+    """一次成功修订前留存的快照。"""
+
+    revision: int = Field(description="修订前的版本号")
+    changed_at: float = Field(description="修订发生时间（Unix 秒）")
+    changed_at_iso: str
+    old_timestamp: float
+    old_timestamp_iso: str
+    old_reference: float
+    old_tolerance: float
+    old_readings: list[ReadingOut] = Field(description="修订前的读数与异常标记")
+    old_group_median: float
+    old_bias: float
 
 
 class IntervalOut(BaseModel):
